@@ -1,0 +1,27 @@
+# Hermes Agent 配置模板
+#
+# 将此文件集成到你的 ~/.hermes/config.yaml 中
+# 或复制需要的部分
+
+plugins:
+  - platform: wechat_uos
+    enabled: true
+
+env:
+  # 必须
+  WECHAT_UOS_ENABLED: true
+  
+  # 可选 - 允许的群组/用户
+  # WECHAT_UOS_ALLOWED_GROUPS: ""
+  # WECHAT_UOS_ALLOWED_USERS: ""
+  
+  # 可选 - 功能开关
+  WECHAT_UOS_RESPOND_TO_DMS: false
+  WECHAT_UOS_QR_HTTP: true
+  WECHAT_UOS_QR_PORT: 8646
+  
+  # 可选 - 默认通知群
+  # WECHAT_UOS_HOME_CHANNEL: @@xxxxxxxxxxxxx
+
+# 注意：数据文件（acl.json, itchat.pkl 等）保存在
+# ~/.hermes/data/wechat_uos/ 目录下，请定期备份
