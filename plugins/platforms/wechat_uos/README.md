@@ -56,9 +56,6 @@ Telegram 频道消息自动转发到指定微信群。支持文字、图片、�
 | `WECHAT_UOS_QR_HTTP` | 是否启动 QR HTTP 服务 | `true` |
 | `WECHAT_UOS_QR_PORT` | QR HTTP 端口 | `8646` |
 | `WECHAT_UOS_HOME_CHANNEL` | 默认通知群组 | 空 |
-| `WERSS_BASE` | WeRSS API 地址 | `http://localhost:8001/api/v1/wx` |
-| `WERSS_USER` | WeRSS 登录用户名 | `admin` |
-| `WERSS_PASS` | WeRSS 登录密码 | `admin123` |
 
 ### 群聊命令
 
@@ -87,11 +84,6 @@ Telegram 频道消息自动转发到指定微信群。支持文字、图片、�
 - `开启更新` / `关闭更新` — 模块更新推送开关（仅管理员）
 - `模块更新状态` — 查看当前跟踪状态
 
-#### 公众号推文（WeRSS）
-- `开启推文` / `关闭推文` — 公众号文章推送开关（仅管理员）
-- 集客之家最新 3 篇合并推送，其他公众号单篇推送
-- 需要独立部署 WeRSS 服务（参见 `docs/werss.md`）
-
 #### 其他
 - `帮助` — 显示帮助菜单
 
@@ -109,6 +101,5 @@ Telegram 频道消息自动转发到指定微信群。支持文字、图片、�
 | `lsposed/config.json` | LSPosed 模块追踪配置 |
 | `lsposed/state.json` | 模块版本状态记录 |
 | `cftc_media/` | CFTC 上传缓存 |
-| `werss_state.json` | 公众号推文已读记录 |
 
 请定期备份 `acl.json` 和 `itchat.pkl`。

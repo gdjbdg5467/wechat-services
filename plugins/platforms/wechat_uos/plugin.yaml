@@ -37,3 +37,18 @@ optional_env:
     description: "Default chat/group ID for cron/notification delivery"
     prompt: "Home channel (optional)"
     password: false
+  - name: WERSS_BASE
+    description: "WeRSS API base URL"
+    prompt: "WeRSS API base URL"
+    password: false
+    default: "http://localhost:8001/api/v1/wx"
+  - name: WERSS_USER
+    description: "WeRSS login username"
+    prompt: "WeRSS username"
+    password: false
+    default: "admin"
+  - name: WERSS_PASS
+    description: "WeRSS login password"
+    prompt: "WeRSS password"
+    password: true
+    default: "admin123"

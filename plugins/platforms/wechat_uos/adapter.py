@@ -51,6 +51,12 @@ CFTC_MEDIA_DIR = CFTC_DIR / "media"
 LSPOSED_DIR = HERMES_HOME / "data" / "lsposed_tracker"
 LSPOSED_CONFIG = LSPOSED_DIR / "config.json"
 LSPOSED_STATE_FILE = LSPOSED_DIR / "state.json"
+# ── WeRSS 公众号文章推送 ──
+WERSS_BASE = "http://localhost:8001/api/v1/wx"
+WERSS_USER = "admin"
+WERSS_PASS = "admin123"
+WERSS_STATE_FILE = STATE_DIR / "werss_state.json"
+WERSS_POLL_INTERVAL = 300  # 5 minutes
 
 PANSOU_SOURCE_LABELS = {
     "quark": "夸克网盘",
@@ -153,6 +159,9 @@ class WeChatUOSAdapter(BasePlatformAdapter):
         # ── LSPosed tracker state ──
         self._lsposed_stop = threading.Event()
         self._lsposed_thread: Optional[threading.Thread] = None
+        # ── WeRSS poller state ──
+        self._werss_stop = threading.Event()
+        self._werss_thread: Optional[threading.Thread] = None
         self._startup_ts = time.time()
         self._login_ts = 0
         self._acl_lock = threading.RLock()
@@ -193,6 +202,7 @@ class WeChatUOSAdapter(BasePlatformAdapter):
             except Exception:
                 pass
             self._qr_server = None
+        self._werss_stop.set()
 
     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         if self._itchat is None:
@@ -288,6 +298,9 @@ class WeChatUOSAdapter(BasePlatformAdapter):
                 # ── LSPosed tracker commands ──
                 if self._handle_lsposed_text_command(text, group_id=group_id, group_name=group_name, sender=sender, sender_id=sender_id):
                     return
+                # ── WeRSS toggle commands ──
+                if self._handle_werss_text_command(text, group_id=group_id, group_name=group_name, sender=sender, sender_id=sender_id):
+                    return
                 if not self._can_use_group(group_id, group_name, sender, sender_id):
                     return
                 logger.info("WeChatUOS: @ from %s in %s: %s", sender, group_name, text)
@@ -322,6 +335,8 @@ class WeChatUOSAdapter(BasePlatformAdapter):
             self._start_tg_fwd()
             # ── Start LSPosed module tracker polling ──
             self._start_lsposed_tracker()
+            # ── Start WeRSS article poller ──
+            self._start_werss_poller()
             # ── Register media handlers for CFTC upload ──
             self._register_cftc_media_handlers()
             itchat.run(blockThread=True)
@@ -451,6 +466,7 @@ class WeChatUOSAdapter(BasePlatformAdapter):
         group.setdefault("updated_at", now)
         group.setdefault("restored_from_group_id", "")
         group.setdefault("lsposed_enabled", False)
+        group.setdefault("werss_enabled", True)
         if group.get("restored_from_group_id") and group.get("updated_at") == now:
             self._save_acl()
         return group
@@ -1478,6 +1494,187 @@ class WeChatUOSAdapter(BasePlatformAdapter):
             self._itchat.send(f"模块更新：{enabled}\\n已跟踪：{len(state.get('modules',{}))} 个模块\\n自定义仓库：{len(cfg.get('custom_repos',[]))} 个", toUserName=group_id)
             return True
         return False
+
+    def _handle_werss_text_command(self, text: str, *, group_id: str, group_name: str, sender: str, sender_id: str) -> bool:
+        s = text.strip().lower().replace(" ", "")
+        if s not in {"开启推文", "关闭推文"}: return False
+        if self._itchat is None: return True
+        with self._acl_lock:
+            group = self._group_acl(group_id, group_name)
+            self._remember_member(group, sender_id, nick=sender, display=sender)
+            if not group.get("authorized"): self._itchat.send("当前群尚未授权。", toUserName=group_id); return True
+            if not self._is_group_admin(group, sender, sender_id): self._itchat.send("你没有权限。", toUserName=group_id); return True
+        if s == "开启推文":
+            with self._acl_lock:
+                group = self._group_acl(group_id, group_name)
+                group["werss_enabled"] = True
+                group["updated_at"] = int(time.time())
+                self._save_acl()
+            self._itchat.send("✅ 公众号推文推送已开启", toUserName=group_id)
+            logger.info("WeRSS: enabled for %s by %s/%s", group_name, sender, sender_id)
+            return True
+        if s == "关闭推文":
+            with self._acl_lock:
+                group = self._group_acl(group_id, group_name)
+                group["werss_enabled"] = False
+                group["updated_at"] = int(time.time())
+                self._save_acl()
+            self._itchat.send("✅ 公众号推文推送已关闭", toUserName=group_id)
+            logger.info("WeRSS: disabled for %s by %s/%s", group_name, sender, sender_id)
+            return True
+        return False
+
+    def _start_werss_poller(self) -> None:
+        if self._werss_thread and self._werss_thread.is_alive(): return
+        self._werss_stop.clear()
+        self._werss_thread = threading.Thread(target=self._werss_poll_loop, name="wechat-uos-werss", daemon=True)
+        self._werss_thread.start()
+        logger.info("WeChatUOS WeRSS: poller started")
+
+    def _werss_login(self) -> Optional[str]:
+        try:
+            data = _urlopen(
+                _URLRequest(
+                    f"{WERSS_BASE}/auth/login",
+                    data=_urlencode({"username": WERSS_USER, "password": WERSS_PASS}).encode(),
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                ),
+                timeout=10,
+            ).read()
+            resp = json.loads(data)
+            return resp.get("data", {}).get("access_token")
+        except Exception:
+            logger.exception("WeChatUOS WeRSS: login failed")
+            return None
+
+    def _werss_fetch_articles(self, token: str) -> List[Dict[str, Any]]:
+        try:
+            data = _urlopen(
+                _URLRequest(
+                    f"{WERSS_BASE}/articles?page=1&page_size=10",
+                    headers={"Authorization": f"Bearer {token}"},
+                ),
+                timeout=15,
+            ).read()
+            resp = json.loads(data)
+            return resp.get("data", {}).get("list", [])
+        except Exception:
+            logger.exception("WeChatUOS WeRSS: fetch articles failed")
+            return []
+
+    def _werss_poll_loop(self) -> None:
+        logger.info("WeChatUOS WeRSS: poll loop started")
+        WERSS_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        last_creates: set = set()
+        if WERSS_STATE_FILE.exists():
+            try:
+                st = json.loads(WERSS_STATE_FILE.read_text())
+                last_creates = set(st.get("seen_ids", []))
+            except Exception:
+                pass
+        while not self._werss_stop.is_set():
+            try:
+                token = self._werss_login()
+                if not token:
+                    time.sleep(60)
+                    continue
+                articles = self._werss_fetch_articles(token)
+                new_articles = [a for a in articles if a.get("id") not in last_creates]
+                if new_articles:
+                    # Mark all fetched IDs as seen
+                    fresh_ids = set()
+                    # Separate 集客之家 articles for batch pushing
+                    jk_articles = [a for a in new_articles if a.get("mp_name", "") == "集客之家"]
+                    other_articles = [a for a in new_articles if a.get("mp_name", "") != "集客之家"]
+                    # Push non-集客之家 articles individually
+                    for a in other_articles:
+                        fresh_ids.add(a.get("id", ""))
+                        self._werss_push_article(a)
+                    # Push 集客之家 articles in batches of 3 (newest 3 merged)
+                    if jk_articles:
+                        jk_articles.sort(key=lambda a: a.get("publish_time", 0) or a.get("id", ""), reverse=True)
+                        batch = jk_articles[:3]
+                        for a in batch:
+                            fresh_ids.add(a.get("id", ""))
+                        self._werss_push_article_batch(batch)
+                    last_creates |= fresh_ids
+                    # Prune to last 200 IDs
+                    if len(last_creates) > 200:
+                        last_creates = set(sorted(last_creates, reverse=True)[:200])
+                    try:
+                        WERSS_STATE_FILE.write_text(json.dumps({
+                            "seen_ids": sorted(last_creates),
+                            "updated_at": int(time.time()),
+                        }, ensure_ascii=False))
+                    except Exception:
+                        pass
+            except Exception:
+                logger.exception("WeChatUOS WeRSS: poll loop error")
+            self._werss_stop.wait(WERSS_POLL_INTERVAL)
+        logger.info("WeChatUOS WeRSS: poll loop stopped")
+
+    def _werss_push_article(self, article: Dict[str, Any]) -> None:
+        try:
+            art_id = article.get("id", "")
+            mp_name = article.get("mp_name", "未知公众号")
+            title = article.get("title", "无标题")
+            url = article.get("url", "")
+            desc = article.get("description", "")
+            # Format message
+            msg = f"📰 {mp_name}\n{title}"
+            if desc:
+                msg += f"\n{desc}"
+            if url:
+                msg += f"\n{url}"
+            # Get enabled groups
+            with self._acl_lock:
+                groups = []
+                for gid, g in list(self._acl.get("groups", {}).items()):
+                    if g.get("authorized") and g.get("werss_enabled", True):
+                        groups.append(gid)
+            for gid in groups:
+                try:
+                    if self._itchat:
+                        self._itchat.send(msg, toUserName=gid)
+                        time.sleep(0.5)  # rate limit
+                except Exception:
+                    logger.exception("WeChatUOS WeRSS: push to %s failed", gid[:16])
+        except Exception:
+            logger.exception("WeChatUOS WeRSS: push article failed")
+
+    def _werss_push_article_batch(self, articles: List[Dict[str, Any]]) -> None:
+        """Push multiple articles from the same account as a single merged message."""
+        if not articles:
+            return
+        try:
+            mp_name = articles[0].get("mp_name", "未知公众号")
+            lines = [f"📰 {mp_name}"]
+            for i, art in enumerate(articles, 1):
+                title = art.get("title", "无标题")
+                url = art.get("url", "")
+                desc = art.get("description", "")
+                lines.append("")
+                lines.append(f"─── {i} ───")
+                lines.append(title)
+                if desc:
+                    lines.append(desc)
+                if url:
+                    lines.append(url)
+            msg = "\n".join(lines)
+            with self._acl_lock:
+                groups = []
+                for gid, g in list(self._acl.get("groups", {}).items()):
+                    if g.get("authorized") and g.get("werss_enabled", True):
+                        groups.append(gid)
+            for gid in groups:
+                try:
+                    if self._itchat:
+                        self._itchat.send(msg, toUserName=gid)
+                        time.sleep(0.5)
+                except Exception:
+                    logger.exception("WeChatUOS WeRSS: batch push to %s failed", gid[:16])
+        except Exception:
+            logger.exception("WeChatUOS WeRSS: batch push failed")
 
     def _migrate_external_gid(self, old_gid: str, new_gid: str, group_name: str) -> None:
         """Migrate GID in TG forward config and CFTC group state after ACL restoration."""
